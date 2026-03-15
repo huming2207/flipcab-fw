@@ -53,8 +53,38 @@ esp_err_t sign_flipper::init()
     return ESP_OK;
 }
 
+void sign_flipper::open() const
+{
+    xEventGroupSetBits(state, STATE_EXEC_OPEN);
+}
+
+void sign_flipper::close() const
+{
+    xEventGroupSetBits(state, STATE_EXEC_CLOSE);
+}
+
 void sign_flipper::flipper_task(void* _ctx)
 {
+    const auto *ctx = static_cast<sign_flipper *>(_ctx);
+    while (true) {
+        EventBits_t bits = xEventGroupWaitBits(ctx->state, STATE_EXECUTE | STATE_HIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        if ((bits & STATE_HIT) != 0) {
+            // Brake immediately, hold brake for 200ms then leave it to Hi-Z (sleep)
+            gpio_set_level(flipcab::MOTOR_CTRL_1, 1);
+            gpio_set_level(flipcab::MOTOR_CTRL_2, 1);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            gpio_set_level(flipcab::MOTOR_CTRL_1, 0);
+            gpio_set_level(flipcab::MOTOR_CTRL_2, 0);
+        } else if ((bits & STATE_EXEC_OPEN) != 0) {
+            gpio_set_level(flipcab::MOTOR_CTRL_1, 0);
+            gpio_set_level(flipcab::MOTOR_CTRL_2, 1);
+        } else if ((bits & STATE_EXEC_CLOSE) != 0) {
+            gpio_set_level(flipcab::MOTOR_CTRL_1, 1);
+            gpio_set_level(flipcab::MOTOR_CTRL_2, 0);
+        }
+
+        vTaskDelay(1);
+    }
 }
 
 void sign_flipper::limit_sw_close_isr(void* _ctx)

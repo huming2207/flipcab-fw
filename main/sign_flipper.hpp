@@ -20,8 +20,9 @@ public:
         STATE_EXEC_OPEN = BIT(0),
         STATE_EXEC_CLOSE = BIT(1),
         STATE_EXECUTE = STATE_EXEC_OPEN | STATE_EXEC_CLOSE,
-        STATE_HIT_OPEN = BIT(2),
-        STATE_HIT_CLOSE = BIT(3),
+        STATE_BRAKE = BIT(2),
+        STATE_HIT_OPEN = BIT(8),
+        STATE_HIT_CLOSE = BIT(9),
         STATE_HIT = STATE_HIT_OPEN | STATE_HIT_CLOSE,
     };
 
@@ -35,7 +36,8 @@ private:
 
 public:
     esp_err_t init();
-
+    void open() const;
+    void close() const;
 
 private:
     static constexpr char TAG[] = "flip_sign";
