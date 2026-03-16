@@ -1,7 +1,11 @@
+#include <esp_timer.h>
 #include <driver/gpio.h>
 
 #include "pin_defs.hpp"
 #include "sign_flipper.hpp"
+
+#include <hal/gpio_ll.h>
+#include "soc/gpio_struct.h"
 
 esp_err_t sign_flipper::init()
 {
@@ -31,6 +35,8 @@ esp_err_t sign_flipper::init()
         return ret;
     }
 
+    gpio_reset_pin(flipcab::LIMIT_SWITCH_OPEN);
+    gpio_reset_pin(flipcab::LIMIT_SWITCH_CLOSE);
     gpio_config_t limit_switch_cfg = {};
     limit_switch_cfg.mode = GPIO_MODE_INPUT;
     limit_switch_cfg.intr_type = GPIO_INTR_NEGEDGE;
@@ -38,6 +44,8 @@ esp_err_t sign_flipper::init()
     limit_switch_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
     limit_switch_cfg.pin_bit_mask = ( 1 << flipcab::LIMIT_SWITCH_CLOSE ) | ( 1 << flipcab::LIMIT_SWITCH_OPEN );
     ret = gpio_config(&limit_switch_cfg);
+    ret = ret ?: gpio_set_intr_type(flipcab::LIMIT_SWITCH_OPEN, GPIO_INTR_NEGEDGE);
+    ret = ret ?: gpio_set_intr_type(flipcab::LIMIT_SWITCH_CLOSE, GPIO_INTR_NEGEDGE);
     ret = ret ?: gpio_isr_handler_add(flipcab::LIMIT_SWITCH_OPEN, limit_sw_open_isr, this);
     ret = ret ?: gpio_isr_handler_add(flipcab::LIMIT_SWITCH_CLOSE, limit_sw_close_isr, this);
     if (ret != ESP_OK) {
@@ -63,24 +71,42 @@ void sign_flipper::close() const
     xEventGroupSetBits(state, STATE_EXEC_CLOSE);
 }
 
+esp_err_t sign_flipper::wait_till_idle(uint32_t timeout_ticks) const
+{
+    if (auto ret = xEventGroupWaitBits(state, STATE_IDLE, pdTRUE, pdFALSE, timeout_ticks); (ret & STATE_IDLE) != 0) {
+        return ESP_OK;
+    }
+
+    return ESP_ERR_TIMEOUT;
+}
+
 void sign_flipper::flipper_task(void* _ctx)
 {
     const auto *ctx = static_cast<sign_flipper *>(_ctx);
     while (true) {
         EventBits_t bits = xEventGroupWaitBits(ctx->state, STATE_EXECUTE | STATE_HIT, pdTRUE, pdFALSE, portMAX_DELAY);
         if ((bits & STATE_HIT) != 0) {
+            if (gpio_ll_get_level(&GPIO, flipcab::LIMIT_SWITCH_OPEN) == 1 && gpio_ll_get_level(&GPIO, flipcab::LIMIT_SWITCH_CLOSE) == 1) {
+                vTaskDelay(1);
+                continue;
+            }
+
             // Brake immediately, hold brake for 200ms then leave it to Hi-Z (sleep)
             gpio_set_level(flipcab::MOTOR_CTRL_1, 1);
             gpio_set_level(flipcab::MOTOR_CTRL_2, 1);
             vTaskDelay(pdMS_TO_TICKS(200));
             gpio_set_level(flipcab::MOTOR_CTRL_1, 0);
             gpio_set_level(flipcab::MOTOR_CTRL_2, 0);
+            xEventGroupSetBits(ctx->state, STATE_IDLE);
+            ESP_LOGI(TAG, "flipper: hit stop!");
         } else if ((bits & STATE_EXEC_OPEN) != 0) {
             gpio_set_level(flipcab::MOTOR_CTRL_1, 0);
             gpio_set_level(flipcab::MOTOR_CTRL_2, 1);
+            ESP_LOGI(TAG, "flipper: open!");
         } else if ((bits & STATE_EXEC_CLOSE) != 0) {
             gpio_set_level(flipcab::MOTOR_CTRL_1, 1);
             gpio_set_level(flipcab::MOTOR_CTRL_2, 0);
+            ESP_LOGI(TAG, "flipper: close!");
         }
 
         vTaskDelay(1);
@@ -91,7 +117,14 @@ void sign_flipper::limit_sw_close_isr(void* _ctx)
 {
     auto *ctx = static_cast<sign_flipper *>(_ctx);
     BaseType_t woken = pdFALSE;
-    xEventGroupSetBitsFromISR(ctx->state, STATE_HIT_CLOSE, &woken);
+    int64_t now = esp_timer_get_time();
+    if (ctx->last_close_limit_switch_isr + LIMIT_SWITCH_DEBOUNCE_US < now) {
+        ctx->last_close_limit_switch_isr = now;
+        if (gpio_ll_get_level(&GPIO, flipcab::LIMIT_SWITCH_CLOSE) < 1) {
+            xEventGroupSetBitsFromISR(ctx->state, STATE_HIT_CLOSE, &woken);
+        }
+    }
+
     if (woken) {
         portYIELD_FROM_ISR();
     }
@@ -101,7 +134,14 @@ void sign_flipper::limit_sw_open_isr(void* _ctx)
 {
     auto *ctx = static_cast<sign_flipper *>(_ctx);
     BaseType_t woken = pdFALSE;
-    xEventGroupSetBitsFromISR(ctx->state, STATE_HIT_OPEN, &woken);
+    int64_t now = esp_timer_get_time();
+    if (ctx->last_open_limit_switch_isr + LIMIT_SWITCH_DEBOUNCE_US < now) {
+        ctx->last_open_limit_switch_isr = now;
+        if (gpio_ll_get_level(&GPIO, flipcab::LIMIT_SWITCH_OPEN) < 1) {
+            xEventGroupSetBitsFromISR(ctx->state, STATE_HIT_OPEN, &woken);
+        }
+    }
+
     if (woken) {
         portYIELD_FROM_ISR();
     }
